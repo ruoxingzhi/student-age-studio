@@ -107,7 +107,11 @@ class MediaWarmup:
 
     def request_scan(self):
         # A picker asks for change detection, never invalidates existing media.
-        if self.thread and self.thread.is_alive(): self.wake.set()
+        # Wakes coalesce: at most one extra scan per interval, so rapid picker
+        # opens cannot chain back-to-back full library walks.
+        if self.thread and self.thread.is_alive():
+            if time.monotonic() - getattr(self, '_last_scan_end', 0) >= 15:
+                self.wake.set()
 
     def close(self):
         self.stop.set(); self.wake.set();self.update(status="cancelled")
@@ -120,6 +124,7 @@ class MediaWarmup:
             try: self.scan()
             except Exception as error:
                 self.update(status='error', phase='部分素材缓存未完成', warnings=[str(error)])
+            self._last_scan_end = time.monotonic()
             self.wake.wait(30)
 
     def files(self, roots, excluded):

@@ -71,10 +71,12 @@ async function open(preferred){
   errorsBox.hidden=!state.errors.length;errorsBox.innerHTML=state.errors.map((e,i)=>`<button data-json-goto="${i}"><strong>第 ${e.line} 行第 ${e.col} 列</strong>${esc(e.message)}${e.fixLine!==e.line||e.fixCol!==e.col?`<em>（应在第 ${e.fixLine} 行第 ${e.fixCol} 列补上）</em>`:''}${e.fixable?'<span class="json-fixable">可一键修复</span>':''}</button>`).join('');
   q('[data-json-fix]').disabled=state.busy||readOnly()||!state.errors.some(e=>e.fixable);paintGutter();}
  function applyAnalysis(a){state.errors=a.errors||[];state.valid=!!a.valid;paintErrors();}
- // Undo history keeps the text before each burst of typing; quick successive keystrokes merge into one step.
- function push(){const now=Date.now();if(text.value===state.current)return;if(now-state.lastPush<700&&state.history.length){state.current=text.value;state.lastPush=now;return;}state.history.push(state.current);if(state.history.length>200)state.history.shift();state.current=text.value;state.future=[];state.lastPush=now;refreshButtons();}
+  // Undo history keeps the text before each burst of typing; quick successive keystrokes merge into one step.
+  // Besides the step count, total retained bytes are capped so a multi-MB file cannot pin hundreds of MB.
+  function trimHistory(){state.historyBytes=state.history.reduce((n,entry)=>n+entry.length,0);while((state.history.length>200||state.historyBytes>32*1024*1024)&&state.history.length){const dropped=state.history.shift();state.historyBytes-=dropped.length;}}
+  function push(){const now=Date.now();if(text.value===state.current)return;if(now-state.lastPush<700&&state.history.length){state.current=text.value;state.lastPush=now;return;}state.history.push(state.current);state.current=text.value;state.future=[];state.lastPush=now;trimHistory();refreshButtons();}
  function refreshButtons(){q('[data-json-undo]').disabled=!state.history.length;q('[data-json-redo]').disabled=!state.future.length;q('[data-json-save]').disabled=state.busy||readOnly()||!dirty();q('[data-json-fix]').disabled=state.busy||readOnly()||!state.errors.some(e=>e.fixable);text.readOnly=readOnly();}
- function setValue(value){state.history.push(state.current);state.future=[];text.value=value;state.current=value;state.lastPush=0;refreshButtons();scheduleMirror();scheduleCheck(0);}
+  function setValue(value){state.history.push(state.current);state.future=[];text.value=value;state.current=value;state.lastPush=0;trimHistory();refreshButtons();scheduleMirror();scheduleCheck(0);}
  function scheduleCheck(delay=600){clearTimeout(timer);if(text.value.length>LIVE_LIMIT){setStatus('文件较大，修改后请点击「检查语法」。');return;}timer=setTimeout(check,delay);}
  function stash(){if(!state?.path)return;state.current=text.value;state.scrollTop=text.scrollTop;state.scrollLeft=text.scrollLeft;drafts.set(state.id+'|'+state.path,state);}
  function ensureFile(name){if(!list.files.some(f=>f.path===name||f.path==='Cfgs/zh-cn/'+name)){const path=name==='manifest.json'?name:'Cfgs/zh-cn/'+name;list.files.push({path,name,virtual:true});select.add(new Option(name,path));}}
@@ -127,7 +129,7 @@ async function open(preferred){
  function goto(index){const e=state.errors[index];if(!e)return;const lines=text.value.split('\n');let pos=0;for(let n=1;n<e.fixLine&&n<=lines.length;n++)pos+=lines[n-1].length+1;pos+=Math.max(0,e.fixCol-1);text.focus();text.setSelectionRange(pos,pos);buildMirror();text.scrollTop=Math.max(0,lineTop(e.fixLine)-text.clientHeight/2);paintErrors();}
  function undo(){if(!state.history.length)return;state.future.push(state.current);state.current=text.value=state.history.pop();state.lastPush=0;refreshButtons();scheduleMirror();scheduleCheck(0);}
  function redo(){if(!state.future.length)return;state.history.push(state.current);state.current=text.value=state.future.pop();state.lastPush=0;refreshButtons();scheduleMirror();scheduleCheck(0);}
- async function close(){if(state.busy)return;await check();stash();clearTimeout(timer);window.STUDIO_LAYERING?.release(dialog);dialog.close();dialog.remove();dialog=null;state=null;syncDrawer=null;closeDrawer=null;locateInDrawer=null;document.body.classList.remove('json-drawer-open');window.STUDIO_STORY_JSON?.finish?.();window.dispatchEvent(new Event('resize'));}
+  async function close(){if(state.busy)return;await check();stash();clearTimeout(timer);observer?.disconnect();window.STUDIO_LAYERING?.release(dialog);dialog.close();dialog.remove();dialog=null;state=null;syncDrawer=null;closeDrawer=null;locateInDrawer=null;document.body.classList.remove('json-drawer-open');window.STUDIO_STORY_JSON?.finish?.();window.dispatchEvent(new Event('resize'));}
  closeDrawer=close;
  text.addEventListener('input',()=>{state.pending=true;push();refreshButtons();scheduleMirror();scheduleCheck(180);});
  text.addEventListener('scroll',()=>{mirror.style.transform=`translate(${-text.scrollLeft}px,${-text.scrollTop}px)`;paintGutter();});

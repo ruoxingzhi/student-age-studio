@@ -245,11 +245,12 @@ class HashQueueBoundTests(unittest.TestCase):
 
     def test_validation_remember_evicts_oldest(self):
         catalog = self._catalog()
-        for index in range(5100):
+        cap = catalog._validation_cap
+        for index in range(cap + 100):
             catalog._remember_validation(('p%d' % index, (1, 2, 3), 'image'), {'size': 1})
-        self.assertEqual(len(catalog.validation), 5000)
+        self.assertEqual(len(catalog.validation), cap)
         self.assertNotIn(('p0', (1, 2, 3), 'image'), catalog.validation)
-        self.assertIn(('p5099', (1, 2, 3), 'image'), catalog.validation)
+        self.assertIn(('p%d' % (cap + 99), (1, 2, 3), 'image'), catalog.validation)
 
 
 class IdRegistryTests(unittest.TestCase):
@@ -281,6 +282,24 @@ class IdRegistryTests(unittest.TestCase):
                 self.assertLess(time.time() - start, 30)
         finally:
             del ids.draft_reserved
+
+
+class WarmupWakeCoalescingTests(unittest.TestCase):
+    """Rapid picker opens cannot chain back-to-back full library walks."""
+
+    def test_request_scan_wakes_at_most_once_per_interval(self):
+        import threading
+        from types import SimpleNamespace
+        from media_warmup import MediaWarmup
+        job = MediaWarmup.__new__(MediaWarmup)
+        job.wake = threading.Event()
+        job.thread = SimpleNamespace(is_alive=lambda: True)
+        job._last_scan_end = time.monotonic()
+        job.request_scan()
+        self.assertFalse(job.wake.is_set())
+        job._last_scan_end = time.monotonic() - 16
+        job.request_scan()
+        self.assertTrue(job.wake.is_set())
 
 
 class SupervisedStartupTests(unittest.TestCase):

@@ -61,8 +61,10 @@ class AssetCatalog:
         self.settings_path = Path(settings_path or backend.settings_path().with_name('asset-folders.json'))
         self.cache = OrderedDict()
         # Bounded LRU: evicted entries recompute byte-identical results.
+        # Sized for big libraries so the background warmer and the foreground
+        # picker stop evicting each other's entries back and forth.
         self.validation = OrderedDict()
-        self._validation_cap = 5000
+        self._validation_cap = 12000
         self._validation_guard = threading.RLock()
         self.image_hashes = {}
         self.hash_index = None
