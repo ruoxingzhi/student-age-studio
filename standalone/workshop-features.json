@@ -1097,5 +1097,17 @@
     "createLabel": "添加送礼事件",
     "native": true,
     "homeCategory": "extension"
+  },
+  {
+    "id": "sync",
+    "label": "同步协作",
+    "description": "多人协作、换电脑同步：存档、时间线、合稿",
+    "tables": [],
+    "entry": {
+      "kind": "sync"
+    },
+    "group": "模组工具",
+    "native": true,
+    "homeCategory": "extension"
   }
 ]

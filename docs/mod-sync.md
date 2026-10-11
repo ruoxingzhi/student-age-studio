@@ -42,4 +42,18 @@
 * 同步只发"已存档"的内容；没存档先报"还没有存档，先存一版再同步"。
 * 测试用真 git（CI 三系统自带），本机没 git 整份跳过；单测跑
   `python -B -m unittest discover -s standalone/tests -p test_sync_store.py`。
-* 后续接 UI／接服务端中转（B 方案）时，`ModSync` 的输入输出形状不变，只换 transport。
+* 后续接服务端中转（B 方案）时，`ModSync` 的输入输出形状不变，只换 transport。
+
+## 界面（已实现）
+
+* 功能入口：工坊主页“同步协作”卡片（`workshop-features.json`，`entry.kind: sync`），
+  经 `workshop.js:openSync` 挂载 `window.StudentAgeSync.create`，与闲聊、事件外对话同模式。
+* 页面文件 `standalone/sync-ui.js`＋`standalone/sync.css`：状态卡、存档、同步（含进度轮询）、
+  时间线（含两步确认回退）、待选定稿、设置（中转站／加入／改名）。样式只用 `--sg-*` 变量，
+  六套主题自动适配；长路径、长文件名处处换行，不断行溢出。
+* 后端接口：`GET /api/sync-status`、`/api/sync-job`，`POST /api/sync-save`、
+  `/api/sync-relay`、`/api/sync-join`、`/api/sync-start`（202 后台任务）、
+  `/api/sync-cancel`、`/api/sync-pick`、`/api/sync-restore`、`/api/sync-device`。
+  任务由 `standalone/sync_service.py:SyncService` 管理，切目录时整批取消。
+* 界面单测 `standalone/tests/sync-ui.cjs`（Playwright fixtures，Linux CI 跑），
+  覆盖全部流程、协作者字符串转义与窄屏无溢出。

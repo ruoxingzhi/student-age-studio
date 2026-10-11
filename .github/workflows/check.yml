@@ -66,4 +66,5 @@ jobs:
           node standalone/tests/workshop-unbind-ui.cjs
           node standalone/tests/unfinished-draft-ui.cjs
           node standalone/tests/social-comment-edit.cjs
+          node standalone/tests/sync-ui.cjs
       - run: python -B tools/build_update.py --out release/student-age-studio-update.zip

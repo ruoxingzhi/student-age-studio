@@ -94,6 +94,9 @@ Backend + frontend live side by side in `standalone/`; no web framework, no JS b
   `--git-dir/--work-tree`. The relay is a bare repo in the user's own cloud folder.
 - Never delete anything in the relay; merge keeps both sides (`合稿待选/`); sync only sends
   committed snapshots. Tests use real git (present in CI); they skip when git is absent.
+- UI: `sync-ui.js` + `sync.css` mounted as workshop feature `sync` (same pattern as idle-chats);
+  style only with `--sg-*` tokens so all six themes adapt. UI test `tests/sync-ui.cjs` runs
+  in the Linux CI block of `check.yml`.
 
 ## Never commit
 

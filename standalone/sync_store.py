@@ -6,8 +6,10 @@ git 只是一个"账本"，装在本机、中转站里，不进 Mod，不进游�
 import hashlib
 import json
 import os
+import re
 import shutil
 import subprocess
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -15,9 +17,33 @@ from pathlib import Path
 MAIN_LINE = 'main'
 DEVICE_FILE = 'device.json'
 PICK_DIR = '合稿待选'
+PICKS_FILE = 'picks.json'
 QUEUE_DIR = '待发送'
 LARGE_WARN_BYTES = 900 * 1024 * 1024
 DEFAULT_TIMEOUT = 300
+SUMMARY_MAX = 200
+DEVICE_NAME_MAX = 30
+
+
+class _Cancelled(Exception):
+    pass
+
+
+class SyncProgress:
+    """同步进度与协作取消。UI 轮询时读 phase/percent。"""
+
+    def __init__(self):
+        self.phase = '准备同步'
+        self.percent = 0
+        self.cancelled = threading.Event()
+
+    def set(self, phase, percent):
+        self.phase = str(phase)
+        self.percent = max(0, min(100, int(percent)))
+
+    def check(self):
+        if self.cancelled is not None and self.cancelled.is_set():
+            raise _Cancelled()
 
 # 用户可见文案里不出现的词（内部名字可以用，绝不展示）。
 _HIDDEN_WORDS = ('commit', 'push', 'pull', 'fetch', 'merge', 'branch', 'clone',
@@ -133,6 +159,13 @@ class ModSync:
     def _call(self, *args, timeout=None, binary=False):
         return self._git(*self._base(), *args, timeout=timeout, binary=binary)
 
+    def ready(self):
+        """账本建好了吗？没建好时读取类操作返回空，不报错。"""
+        try:
+            return (self.store / 'repo' / 'HEAD').is_file()
+        except OSError:
+            return False
+
     # ---- 建账本 / 加中转站 ----
 
     def start_fresh(self, display_name=None):
@@ -178,6 +211,8 @@ class ModSync:
     def save_snapshot(self, summary):
         """存档：把当前 Mod 的样子记一笔。没变化就不记。"""
         summary = str(summary or '').strip() or '随手存档'
+        if len(summary) > SUMMARY_MAX:
+            raise SyncError(f'存档说明最多 {SUMMARY_MAX} 个字。', 'summary_too_long')
         code, output = self._call('status', '--porcelain=v1', '-uall')
         _must(code, output, '看现状')
         if not output.strip():
@@ -212,6 +247,8 @@ class ModSync:
 
     def current_state(self):
         """现状：相对上次存档，改了什么、新增什么、删了什么。"""
+        if not self.ready():
+            return {'已修改': [], '新增': [], '已删除': []}
         code, output = self._call('status', '--porcelain=v1', '-uall')
         _must(code, output, '看现状')
         changed, added, removed = [], [], []
@@ -256,38 +293,54 @@ class ModSync:
         code, _ = self._call('rev-parse', '--verify', f'relay/{MAIN_LINE}')
         return code == 0
 
-    def sync(self):
+    def sync(self, progress=None):
         """同步：收别人的、合到一起、再发上去。全程中文结果。"""
-        self.start_fresh()
-        code, _ = self._call('remote', 'get-url', 'relay')
-        if code != 0:
-            raise SyncError('还没选中转站，请先选一个网盘文件夹当中转站。', 'relay_missing')
-        code, output = self._call('fetch', 'relay')
-        if code != 0:
-            raise SyncError('中转站还没同步完（网盘正在传），稍后再点同步。', 'relay_not_ready')
-        report = {'合上': [], '待选': [], '已发送': False, '说明': []}
-        if not self._relay_branch_exists():
-            if not self._head():
-                report['说明'].append('还没有存档，先存一版再同步。')
+        progress = progress or SyncProgress()
+        try:
+            self.start_fresh()
+            code, _ = self._call('remote', 'get-url', 'relay')
+            if code != 0:
+                raise SyncError('还没选中转站，请先选一个网盘文件夹当中转站。', 'relay_missing')
+            progress.set('正在收中转站的稿', 10)
+            progress.check()
+            code, output = self._call('fetch', 'relay')
+            if code != 0:
+                raise SyncError('中转站还没同步完（网盘正在传），稍后再点同步。', 'relay_not_ready')
+            report = {'合上': [], '待选': [], '已发送': False, '说明': []}
+            if not self._relay_branch_exists():
+                if not self._head():
+                    report['说明'].append('还没有存档，先存一版再同步。')
+                    return report
+                progress.set('正在发上去', 80)
+                progress.check()
+                pushed = self._push()
+                report['已发送'] = pushed
+                report['说明'].append('中转站是空的，已把你的稿放上去。')
+                progress.set('同步完成', 100)
                 return report
-            pushed = self._push()
-            report['已发送'] = pushed
-            report['说明'].append('中转站是空的，已把你的稿放上去。')
+            before = self._head()
+            progress.set('正在合稿', 40)
+            progress.check()
+            code, output = self._call('merge', '--no-commit', '--no-ff', f'relay/{MAIN_LINE}')
+            if code == 0:
+                self._finish_merge('同步：收下中转站的更新')
+                report['合上'] = self._changed_between(before, self._head())
+                if not report['合上']:
+                    report['说明'].append('两边一模一样，不用合。')
+            else:
+                report['待选'] = self._keep_both()
+                self._finish_merge('合稿：两边都改了，各留一份待选')
+                report['合上'] = self._changed_between(before, self._head())
+                report['说明'].append('有几处两边改的不一样，都留着，请在待选里挑。')
+            progress.set('正在发上去', 80)
+            progress.check()
+            report['已发送'] = self._push_with_retry(progress)
+            progress.set('同步完成', 100)
             return report
-        before = self._head()
-        code, output = self._call('merge', '--no-commit', '--no-ff', f'relay/{MAIN_LINE}')
-        if code == 0:
-            self._finish_merge('同步：收下中转站的更新')
-            report['合上'] = self._changed_between(before, self._head())
-            if not report['合上']:
-                report['说明'].append('两边一模一样，不用合。')
-        else:
-            report['待选'] = self._keep_both()
-            self._finish_merge('合稿：两边都改了，各留一份待选')
-            report['合上'] = self._changed_between(before, self._head())
-            report['说明'].append('有几处两边改的不一样，都留着，请在待选里挑。')
-        report['已发送'] = self._push_with_retry()
-        return report
+        except _Cancelled:
+            return {'合上': [], '待选': self.pending_picks(), '已发送': False,
+                    '说明': ['已停止等待；若内容已发出，可去中转站确认，本地稿子都在。'],
+                    'cancelled': True}
 
     def _head(self):
         code, output = self._call('rev-parse', 'HEAD')
@@ -339,7 +392,77 @@ class ModSync:
                 note['处理'] = '两边不一样，已保留你的，对方的存在待选里。'
                 note['对方版本'] = str(aside)
             picked.append(note)
+        fresh = {item['文件'] for item in picked}
+        kept = [item for item in self.pending_picks() if item.get('文件') not in fresh]
+        self._write_picks(kept + [
+            {'文件': item['文件'], '对方版本': item.get('对方版本', ''),
+             '处理': item['处理'], '作者': device.get('name', '对方'), '时间': _localnow()}
+            for item in picked])
         return picked
+
+    def _picks_path(self):
+        return self.store / PICKS_FILE
+
+    def _write_picks(self, picks):
+        try:
+            self._picks_path().write_text(json.dumps(picks, ensure_ascii=False, indent=2),
+                                          encoding='utf-8')
+        except OSError:
+            pass
+
+    def pending_picks(self):
+        """还没定稿的待选（对方版本文件还在才算数）。"""
+        try:
+            data = json.loads(self._picks_path().read_text(encoding='utf-8'))
+        except (OSError, ValueError):
+            return []
+        if not isinstance(data, list):
+            return []
+        alive = []
+        changed = False
+        for item in data:
+            if not isinstance(item, dict) or not item.get('文件'):
+                changed = True
+                continue
+            aside = item.get('对方版本')
+            if aside and not Path(aside).is_file():
+                changed = True
+                continue
+            alive.append(item)
+        if changed:
+            self._write_picks(alive)
+        return alive
+
+    def resolve_pick(self, filename, choice):
+        """给一份待选定稿：choice 为 留我的 / 要对方的。"""
+        if choice not in ('留我的', '要对方的'):
+            raise SyncError('请选择“留我的”或“要对方的”。', 'pick_invalid')
+        picks = self.pending_picks()
+        entry = next((item for item in picks if item.get('文件') == filename), None)
+        if entry is None:
+            raise SyncError('这份待选已经不在了，请刷新。', 'pick_missing')
+        device = ensure_device(self.store)
+        if choice == '要对方的':
+            aside = Path(entry.get('对方版本', ''))
+            try:
+                inside = aside.resolve().parent == (self.store / PICK_DIR).resolve()
+            except OSError:
+                inside = False
+            if not aside.is_file() or not inside:
+                raise SyncError('对方版本找不到了，请重新同步一次。', 'pick_missing')
+            target = self.mod / filename
+            target.parent.mkdir(parents=True, exist_ok=True)
+            target.write_bytes(aside.read_bytes())
+            code, _ = self._call('add', '-A')
+            _must(code, '', '合稿定稿')
+            code, _ = self._call('commit', '--no-edit', '-m',
+                                 f'合稿定稿：{filename}用{entry.get("作者", "对方")}的版\n\n'
+                                 f'{device["name"]} · {_localnow()}')
+            _must(code, '', '合稿定稿')
+            aside.unlink(missing_ok=True)
+        remaining = [item for item in picks if item.get('文件') != filename]
+        self._write_picks(remaining)
+        return {'ok': True, '剩余待选': len(remaining)}
 
     def _blob(self, ref):
         code, output = self._call('show', ref, binary=True)
@@ -356,7 +479,7 @@ class ModSync:
         code, output = self._call('push', 'relay', f'{MAIN_LINE}:{MAIN_LINE}')
         return code == 0
 
-    def _push_with_retry(self):
+    def _push_with_retry(self, progress=None):
         if self._push():
             return True
         code, output = self._call('fetch', 'relay')
@@ -368,9 +491,70 @@ class ModSync:
             self._keep_both()
         self._finish_merge('合稿：和中转站对齐后重发')
         _ = before
+        if progress is not None:
+            progress.check()
         if not self._push():
             raise SyncError('对方也在同步，先收了他的再发一次即可。', 'push_retry')
         return True
+
+    # ---- 定稿 / 回退 / 设备 / 中转站信息 ----
+
+    def snapshot_count(self):
+        """时间线里共有几个存档点（拿不到就报 0，不报错）。"""
+        code, output = self._call('rev-list', '--count', 'HEAD')
+        if code != 0:
+            return 0
+        try:
+            return max(0, int(output.strip()))
+        except ValueError:
+            return 0
+
+    def set_device_name(self, name):
+        """给这台电脑改名。"""
+        name = str(name or '').strip()
+        if not name or len(name) > DEVICE_NAME_MAX:
+            raise SyncError(f'设备名字 1 到 {DEVICE_NAME_MAX} 个字。', 'device_name_invalid')
+        device = ensure_device(self.store, name)
+        code, _ = self._call('config', 'user.name', device['name'])
+        return device
+
+    def relay_info(self):
+        """中转站地址＋参与过的人（按最近一次出现排序）。"""
+        code, output = self._call('remote', 'get-url', 'relay')
+        relay = output.strip() if code == 0 else ''
+        seen, devices = set(), []
+        for entry in self.timeline(limit=200):
+            who = entry.get('作者', '')
+            if not who or who in seen:
+                continue
+            seen.add(who)
+            devices.append({'名字': who, '最近': entry.get('时间', '')})
+        return {'中转站': relay, '成员': devices}
+
+    def restore_snapshot(self, commit_id):
+        """回到某次存档：先自动存下当前样子，再恢复，保证丢不了。"""
+        short = str(commit_id or '').strip()
+        if not re.fullmatch(r'[0-9a-fA-F]{7,40}', short):
+            raise SyncError('这个存档编号不对，请重新选。', 'restore_invalid')
+        code, output = self._call('rev-parse', '--verify', short)
+        if code != 0:
+            raise SyncError('找不到这次存档，可能已经被整理掉，请刷新时间线。', 'restore_missing')
+        full = output.strip()
+        message = self.timeline(limit=200)
+        label = next((entry['说明'] for entry in message if entry['编号'] == full[:8]), '旧存档')
+        state = self.current_state()
+        if state['已修改'] or state['新增'] or state['已删除']:
+            self.save_snapshot('回退前自动存档')
+        code, output = self._call('checkout', full, '--', '.')
+        _must(code, output, '回到存档')
+        device = ensure_device(self.store)
+        code, _ = self._call('add', '-A')
+        _must(code, '', '回到存档')
+        code, _ = self._call('commit', '--no-edit', '-m',
+                             f'回到存档：{label}\n\n{device["name"]} · {_localnow()}')
+        _must(code, '', '回到存档')
+        code, output = self._call('rev-parse', '--short', 'HEAD')
+        return {'ok': True, 'id': output.strip() if code == 0 else ''}
 
     # ---- 体量提醒 ----
 

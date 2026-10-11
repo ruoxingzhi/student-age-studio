@@ -53,6 +53,8 @@ from backups import ModBackups
 from mod_copy import excluded_entry, stable_copy
 from condition_library import ConditionLibrary, UserConditionPresets, named_entries
 import workshop_publish
+import sync_store
+from sync_service import SyncService
 
 try:
     from PIL import Image, UnidentifiedImageError
@@ -2507,7 +2509,7 @@ class StudioStore:
                 if key == 'next':field.pop('range', None)
         return schema
 
-    def workshop_features(self, tables):
+    def workshop_features(self, tables, project=None):
         definitions = read_json(Path(__file__).with_name("workshop-features.json"), [])
         by_name = {row["name"]: row for row in tables}
         result = []
@@ -2517,6 +2519,11 @@ class StudioStore:
             if name and feature.get("id") != "external-dialogues" and not by_name.get(name, {}).get("schema", {}).get("nativePage"):
                 continue
             feature["localCount"] = sum(by_name.get(t, {}).get("localCount", 0) for t in ([name] if feature.get("id")=="idle-chats" else feature.get("tables", [])))
+            if feature.get("id") == "sync" and project is not None:
+                try:
+                    feature["localCount"] = sync_store.ModSync(project.path).snapshot_count()
+                except Exception:
+                    feature["localCount"] = 0
             feature["tables"] = [table for table in feature.get("tables", []) if table in by_name]
             result.append(feature)
         known = {name for feature in result for name in feature.get("tables", [])}
@@ -2574,7 +2581,7 @@ class StudioStore:
             import plugin_mode
             _, _, plugin_ids = plugin_mode.references(project,sys.modules[__name__])
             return {"pluginEditing": plugin_mode.editing(project), "allPluginGameIds":plugin_mode.game_ids(project,sys.modules[__name__]), "pluginGameIds": plugin_ids, "project": project.public(), "revision": self.revision(project), "tables": result,
-                    "features": self.workshop_features(result), "warnings": warnings_list,
+                    "features": self.workshop_features(result, project), "warnings": warnings_list,
                     "supported": [entry["name"] for entry in result], "catalogAvailable": bool(catalog.get("schemas")),
                     "operations": catalog.get("operations", []), "commands": commands,
                     "referenceResolution": resolution}
@@ -4100,6 +4107,7 @@ class StudioServer(ThreadingHTTPServer):
         self.startup = StartupPreparation(self)
         self.media_warmup = MediaWarmup(self)
         self.publisher = workshop_publish.Publisher()
+        self.sync_service = SyncService()
         from app_updates import AppUpdates
         from error_logs import APP_VERSION
         self.updates = AppUpdates(self.web_root, APP_VERSION)
@@ -4289,6 +4297,10 @@ class StudioServer(ThreadingHTTPServer):
             raise ApiError('请等待创意工坊发布结束后再切换游戏目录。', 409)
         self.publisher.close()
         self.publisher = workshop_publish.Publisher()
+        if hasattr(self, "sync_service"):
+            try: self.sync_service.close()
+            except Exception: pass
+            self.sync_service = SyncService()
         if hasattr(self, "media_warmup"): self.media_warmup.close()
         try: self.store.close()
         except Exception: pass
@@ -4561,6 +4573,17 @@ class StudioHandler(BaseHTTPRequestHandler):
             if route == "/api/publish-prereq":
                 return self.send_json(self.server.publisher.prereq(
                     self.server.store, sys.modules[__name__], query.get('projectId', [''])[0]))
+            if route == "/api/sync-status":
+                try:
+                    return self.send_json(self.server.sync_service.overview(
+                        self.server.store, sys.modules[__name__], query.get('projectId', [''])[0]))
+                except sync_store.SyncError as error:
+                    raise ApiError(error.message, 400, error.code)
+            if route == "/api/sync-job":
+                result = self.server.sync_service.status(query.get('jobId', [''])[0])
+                if result is None:
+                    raise ApiError('找不到该同步任务。', 404, 'not_found')
+                return self.send_json(result)
             if route == "/api/project-preferences":
                 if query.get("startup", [""])[0] == "1":
                     return self.send_json({"defaultProjectId": self.server.store.project_preferences.saved.get("defaultProjectId", "")})
@@ -4958,6 +4981,51 @@ class StudioHandler(BaseHTTPRequestHandler):
                 if result is None:
                     raise ApiError('找不到该发布任务。', 404, 'not_found')
                 return self.send_json(result)
+            if route == "/api/sync-save":
+                try:
+                    return self.send_json(self.server.sync_service.save(
+                        self.server.store, sys.modules[__name__], payload), 201)
+                except sync_store.SyncError as error:
+                    raise ApiError(error.message, 400 if error.code == 'summary_too_long' else 409
+                                   if error.code == 'conflict' else 400, error.code)
+            if route == "/api/sync-relay":
+                try:
+                    return self.send_json(self.server.sync_service.set_relay(
+                        self.server.store, sys.modules[__name__], payload))
+                except sync_store.SyncError as error:
+                    raise ApiError(error.message, 400, error.code)
+            if route == "/api/sync-join":
+                try:
+                    return self.send_json(self.server.sync_service.join(
+                        self.server.store, sys.modules[__name__], payload), 201)
+                except sync_store.SyncError as error:
+                    raise ApiError(error.message, 400, error.code)
+            if route == "/api/sync-start":
+                return self.send_json(self.server.sync_service.start(
+                    self.server.store, payload.get('projectId') if isinstance(payload, dict) else None), 202)
+            if route == "/api/sync-cancel":
+                result = self.server.sync_service.cancel((payload or {}).get('jobId'))
+                if result is None:
+                    raise ApiError('找不到该同步任务。', 404, 'not_found')
+                return self.send_json(result)
+            if route == "/api/sync-pick":
+                try:
+                    return self.send_json(self.server.sync_service.resolve_pick(
+                        self.server.store, sys.modules[__name__], payload))
+                except sync_store.SyncError as error:
+                    raise ApiError(error.message, 400, error.code)
+            if route == "/api/sync-restore":
+                try:
+                    return self.send_json(self.server.sync_service.restore(
+                        self.server.store, sys.modules[__name__], payload), 201)
+                except sync_store.SyncError as error:
+                    raise ApiError(error.message, 400, error.code)
+            if route == "/api/sync-device":
+                try:
+                    return self.send_json(self.server.sync_service.rename_device(
+                        self.server.store, sys.modules[__name__], payload))
+                except sync_store.SyncError as error:
+                    raise ApiError(error.message, 400, error.code)
             if route == '/api/premises/references':
                 return self.send_json(self.server.store.premise_references(payload))
             if route == "/api/premises/create":
