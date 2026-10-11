@@ -6,8 +6,8 @@ const assert=require('node:assert/strict'),fs=require('node:fs'),path=require('n
 const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
 (async()=>{const browser=await chromium.launch({headless:true,...(process.env.CHROME_PATH?{executablePath:process.env.CHROME_PATH}:{})});try{
  const page=await browser.newPage({viewport:{width:1600,height:1000}});
- const errors=[],calls={save:[],job:0,pick:[],restore:[],relay:[],join:[],rename:[]};
- const status={joined:false,relay:'',members:[],device:{id:'d1',name:'<img src=x onerror=alert(1)>'},pendingPicks:[],timeline:[{'编号':'base1111','时间':'2026-01-01 10:00','作者':'我','说明':'底稿<script>alert(1)</script>'}],snapshotCount:1,state:{'已修改':[],'新增':[],'已删除':[]},sizeWarning:'',revision:'r1',readOnly:false};
+ const errors=[],calls={save:[],job:0,pick:[],restore:[],relay:[],join:[],rename:[],team:[]};
+ const status={joined:false,relay:'',members:[],device:{id:'d1',name:'<img src=x onerror=alert(1)>'},pendingPicks:[],timeline:[{'编号':'base1111','时间':'2026-01-01 10:00','作者':'我','说明':'底稿<script>alert(1)</script>'}],snapshotCount:1,state:{'已修改':[],'新增':[],'已删除':[]},sizeWarning:'',revision:'r1',readOnly:false,team:{active:true,isOwner:true,myDeviceId:'d1',mySlot:5,shards:1024,members:[{id:'d1',name:'我',slot:5,me:true,owner:true},{id:'d2',name:'对方',slot:9,me:false,owner:false}],collisions:[]}};
  page.on('pageerror',e=>errors.push(e.message));
  await page.route('http://sync.test/**',async route=>{const url=new URL(route.request().url());
   if(url.pathname==='/')return route.fulfill({contentType:'text/html; charset=utf-8',body:'<html><body><div id="wk-sync"></div></body></html>'});
@@ -21,6 +21,7 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
   if(url.pathname==='/api/sync-pick'){const data=route.request().postDataJSON();calls.pick.push(data);status.pendingPicks=[];return route.fulfill({json:{ok:true,'剩余待选':0,revision:'r4'}});}
   if(url.pathname==='/api/sync-restore'){const data=route.request().postDataJSON();calls.restore.push(data);return route.fulfill({json:{ok:true,revision:'r5'}});}
   if(url.pathname==='/api/sync-device'){const data=route.request().postDataJSON();calls.rename.push(data);status.device.name=data.name;return route.fulfill({json:{device:status.device}});}
+  if(url.pathname==='/api/sync-team-reroll'){calls.team.push(route.request().postDataJSON());return route.fulfill({json:{ok:true,revision:'r6'}});}
   return route.fulfill({status:404,body:''});});
  await page.goto('http://sync.test/');
  for(const file of ['styles.css','workshop.css','sync.css'])await page.addStyleTag({path:path.join(__dirname,'..',file)});
@@ -29,11 +30,11 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
  await page.evaluate(async()=>{const m=window.__mod;window.__notices=[];const ui=StudentAgeSync.create(m.host,{project:m.mod,api:m.api,token:'',status:(t,e)=>{window.__notices.push([t,!!e]);},home:async()=>{},onState:()=>{},onSaved:async()=>{}});window.__ui=ui;await ui.load();});
  await page.locator('.sync-wrap').waitFor();
  assert.match(await page.locator('.sync-head h2').textContent(),/同步协作/);
- assert.equal(await page.locator('.sync-badge').textContent(),'未加入同步');
+ assert.equal(await page.locator('.sync-card[aria-label="同步状态"] .sync-badge').textContent(),'未加入同步');
  // Relay setup.
  await page.locator('[data-sync-input="relayPath"]').fill('D:\\网盘\\拾光工坊同步');
  await page.locator('[data-sync="relay"]').click();
- await page.locator('.sync-badge:has-text("已连接")').waitFor();
+ await page.locator('.sync-card[aria-label="同步状态"] .sync-badge:has-text("已连接")').waitFor();
  assert.deepEqual(calls.relay,[{projectId:'local:qa',path:'D:\\网盘\\拾光工坊同步'}]);
  await page.locator('[data-sync="join"]').click();
  await page.waitForFunction(()=>window.__notices.some(n=>n[0].includes('已加入')));
@@ -66,6 +67,12 @@ const {chromium}=require(process.env.PLAYWRIGHT_MODULE||'playwright');
  await page.locator('[data-sync="rename"]').click();
  await page.waitForFunction(()=>document.body.textContent.includes('主力机'));
  assert.deepEqual(calls.rename,[{projectId:'local:qa',name:'主力机'}]);
+ // Team block renders; reroll posts and keeps both members listed.
+ await page.locator('.sync-card[aria-label="协作组"]').waitFor();
+ assert.match(await page.locator('.sync-card[aria-label="协作组"]').textContent(),/号段 5 \/ 1024/);
+ await page.locator('[data-sync="team-reroll"]').click();
+ await page.waitForFunction(()=>window.__notices.some(n=>n[0].includes('号段已重领')));
+ assert.deepEqual(calls.team,[{projectId:'local:qa'}]);
  // Narrow viewport: long paths must wrap, never overflow their cards.
  await page.setViewportSize({width:700,height:800});
  const overflow=await page.evaluate(()=>[...document.querySelectorAll('.sync-item-main strong,.sync-stat strong')].map(el=>el.scrollWidth-el.clientWidth));

@@ -7,6 +7,7 @@ import hashlib
 import json
 import os
 import re
+import secrets
 import shutil
 import subprocess
 import threading
@@ -16,6 +17,8 @@ from pathlib import Path
 
 MAIN_LINE = 'main'
 DEVICE_FILE = 'device.json'
+TEAM_FILE = 'StudentAgeStudio/sync-team.json'
+SHARDS = 1024
 PICK_DIR = '合稿待选'
 PICKS_FILE = 'picks.json'
 QUEUE_DIR = '待发送'
@@ -115,6 +118,180 @@ def default_store_dir(mod_path):
     from storage_paths import user_data_root
     key = hashlib.sha1(os.path.normcase(str(Path(mod_path).resolve())).encode()).hexdigest()[:16]
     return Path(user_data_root()) / 'sync' / key
+
+
+def shard_interval(start, end, step, shard, shards=SHARDS):
+    """号段分片：同一公式前后端各一份，行为逐位一致。
+
+    把 [start, end] 按 step 切成 shards 段，取第 shard 段。
+    用完（lo > end）就抛号段用完，不去别家串门。
+    """
+    count = (end - start) // step + 1
+    if count <= 0:
+        raise SyncError('编号范围无效。', 'shard_exhausted')
+    per = (count + shards - 1) // shards
+    lo = start + shard * per * step
+    hi = min(end, lo + (per - 1) * step)
+    return lo, hi
+
+
+def read_team(mod_path):
+    """读协作组；没有或坏了返回 None（单人模式，不报错）。"""
+    try:
+        data = json.loads((Path(mod_path) / TEAM_FILE).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    members = data.get('members')
+    if not isinstance(members, dict):
+        return None
+    clean = {}
+    for key, row in members.items():
+        if not isinstance(row, dict):
+            continue
+        try:
+            slot = int(row.get('slot'))
+        except (TypeError, ValueError):
+            continue
+        if not 0 <= slot < SHARDS:
+            continue
+        clean[str(key)] = {'name': str(row.get('name', ''))[:30], 'slot': slot,
+                           'joinedAt': str(row.get('joinedAt', ''))}
+    if not clean:
+        return None
+    return {'version': 1, 'owner': str(data.get('owner', '')), 'members': clean}
+
+
+def write_team(mod_path, team):
+    """原子写协作组文件（网盘同步一半读到坏文件时读端会自动忽略）。"""
+    from platform_support import replace_file
+    target = Path(mod_path) / TEAM_FILE
+    target.parent.mkdir(parents=True, exist_ok=True)
+    tmp = target.with_name('.' + target.name + '.tmp')
+    tmp.write_text(json.dumps(team, ensure_ascii=False, indent=2), encoding='utf-8')
+    replace_file(tmp, target)
+
+
+def read_device_id(mod_path, store_dir=None):
+    """只读身份，不创建（读路径零副作用，单人用户无感）。"""
+    root = Path(store_dir) if store_dir else default_store_dir(mod_path)
+    try:
+        data = json.loads((root / DEVICE_FILE).read_text(encoding='utf-8'))
+    except (OSError, ValueError):
+        return ''
+    return str(data.get('id', '')) if isinstance(data, dict) else ''
+
+
+def active_slot(mod_path, store_dir=None):
+    """我的号段；单人（无组／不足两人／我不在组里）返回 None，全程无副作用。"""
+    team = read_team(mod_path)
+    if team is None or len(team['members']) < 2:
+        return None
+    entry = team['members'].get(read_device_id(mod_path, store_dir))
+    return entry['slot'] if entry else None
+
+
+def team_collisions(team):
+    """撞号段的成员名分组。"""
+    by_slot = {}
+    for key, row in team['members'].items():
+        by_slot.setdefault(row['slot'], []).append(row['name'] or key)
+    return sorted(names for names in by_slot.values() if len(names) > 1)
+
+
+def ensure_team(mod_path, device):
+    """主人开组：没有才建，有就原样返回。"""
+    team = read_team(mod_path)
+    if team is not None:
+        return team, False
+    team = {'version': 1, 'owner': str(device['id']),
+            'members': {str(device['id']): {'name': str(device.get('name', ''))[:30],
+                                            'slot': 0, 'joinedAt': _localnow()}}}
+    write_team(mod_path, team)
+    return team, True
+
+
+def add_member(mod_path, device):
+    """加入组：已有组才进；名字变了顺手更新；随机领一段空号段。"""
+    team = read_team(mod_path)
+    if team is None:
+        return None
+    key = str(device['id'])
+    if key in team['members']:
+        team['members'][key]['name'] = str(device.get('name', ''))[:30]
+        write_team(mod_path, team)
+        return team
+    taken = {row['slot'] for row in team['members'].values()}
+    for _ in range(200):
+        candidate = secrets.randbelow(SHARDS)
+        if candidate not in taken:
+            break
+    else:
+        raise SyncError('号段暂时分完了，请找主人清理成员。', 'shards_full')
+    team['members'][key] = {'name': str(device.get('name', ''))[:30],
+                            'slot': candidate, 'joinedAt': _localnow()}
+    write_team(mod_path, team)
+    return team
+
+
+def reroll_slot(mod_path, device_id):
+    """给自己重领一段（撞号段时点一下）。"""
+    team = read_team(mod_path)
+    if team is None:
+        raise SyncError('还没开始协作，不用领号段。', 'team_missing')
+    if str(device_id) not in team['members']:
+        raise SyncError('你不在协作组里，请重新加入。', 'team_not_member')
+    taken = {key: row['slot'] for key, row in team['members'].items() if key != str(device_id)}
+    taken = set(taken.values())
+    for _ in range(200):
+        candidate = secrets.randbelow(SHARDS)
+        if candidate not in taken:
+            break
+    else:
+        raise SyncError('号段暂时分完了，请找主人清理成员。', 'shards_full')
+    team['members'][str(device_id)]['slot'] = candidate
+    write_team(mod_path, team)
+    return team
+
+
+def set_member_slot(mod_path, device_id, shard):
+    """主人指定某人号段。"""
+    try:
+        shard = int(shard)
+    except (TypeError, ValueError):
+        raise SyncError('号段是 0 到 1023 的整数。', 'shard_invalid')
+    if not 0 <= shard < SHARDS:
+        raise SyncError('号段是 0 到 1023 的整数。', 'shard_invalid')
+    team = read_team(mod_path)
+    if team is None:
+        raise SyncError('还没开始协作。', 'team_missing')
+    if str(device_id) not in team['members']:
+        raise SyncError('这个人不在组里，请让他重新加入。', 'team_not_member')
+    team['members'][str(device_id)]['slot'] = shard
+    write_team(mod_path, team)
+    return team
+
+
+def remove_member(mod_path, device_id):
+    """移出成员；主人走时把组交给最早加入的人，人走光了组就散了。"""
+    team = read_team(mod_path)
+    if team is None:
+        raise SyncError('还没开始协作。', 'team_missing')
+    key = str(device_id)
+    if key not in team['members']:
+        raise SyncError('这个人不在组里。', 'team_not_member')
+    del team['members'][key]
+    if not team['members']:
+        try:
+            (Path(mod_path) / TEAM_FILE).unlink(missing_ok=True)
+        except OSError:
+            pass
+        return None
+    if team['owner'] == key:
+        team['owner'] = next(iter(team['members']))
+    write_team(mod_path, team)
+    return team
 
 
 def ensure_device(store_dir, display_name=None):
@@ -287,7 +464,25 @@ class ModSync:
             raise SyncError('中转站里还没有稿，请让先发的人先同步一次。', 'relay_empty')
         code, output = self._call('checkout', '-B', MAIN_LINE, f'relay/{MAIN_LINE}')
         _must(code, output, '拿稿')
+        if read_team(self.mod) is not None:
+            device = ensure_device(self.store)
+            add_member(self.mod, device)
+            self.commit_team(f'新成员加入：{device["name"]}')
         return {'ok': True}
+
+    def commit_team(self, message):
+        """只提交协作组文件（成员变动），不动别的。没变化就不记。"""
+        device = ensure_device(self.store)
+        code, output = self._call('status', '--porcelain=v1', '--', TEAM_FILE)
+        _must(code, output, '协作设置')
+        if not output.strip():
+            return {'committed': False}
+        code, _ = self._call('add', TEAM_FILE)
+        _must(code, '', '协作设置')
+        code, _ = self._call('commit', '--no-edit', '-m',
+                             f'{message}\n\n{device["name"]} · {_localnow()}')
+        _must(code, '', '协作设置')
+        return {'committed': True}
 
     def _relay_branch_exists(self):
         code, _ = self._call('rev-parse', '--verify', f'relay/{MAIN_LINE}')

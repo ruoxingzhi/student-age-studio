@@ -46,6 +46,7 @@ jobs:
       - run: node standalone/tests/mac-folder-bridge.cjs
       - run: node standalone/tests/json-unrelated-save.cjs
       - run: node standalone/tests/remote-routing.cjs
+      - run: node standalone/tests/sync-shard.cjs
       - run: node --expose-gc standalone/tests/remote-load-order.cjs
       - name: Prepare settings browser checks
         if: runner.os == 'Linux'

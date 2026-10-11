@@ -953,7 +953,7 @@ class AssetCatalog:
         faces = self._rows(target, 'ModFaceCfg', warnings_list)
         if warnings_list: self.error(warnings_list[0], 422)
         occupied = {**self.store.catalog_rows('PersonCfg'), **{str(int(key) // 1000): {} for key in {**self.store.catalog_rows('ModFaceCfg'), **faces} if str(key).isdigit()}}
-        ident = self.store.record_ids.allocate('PersonCfg', {**occupied, **persons})
+        ident = self.store.record_ids.allocate('PersonCfg', {**occupied, **persons}, project_path=target.path)
         source = item['_row']
         person = {'id': ident, 'name': self.api.display_name(payload.get('name'), item['name']), 'gender': source.get('gender', 0),
                   'init': [0], 'birthday': copy.deepcopy(source.get('birthday', [])), 'nicknames': copy.deepcopy(source.get('nicknames', [])),
@@ -998,7 +998,7 @@ class AssetCatalog:
         if not isinstance(reserved, list) or len(reserved)>20000 or any(isinstance(value,bool) or not isinstance(value,int) or not self.api.valid_id(value) for value in reserved):
             self.error('CG 草稿编号列表无效。')
         occupied = {**rows, **{str(value):None for value in reserved}}
-        ident = self.store.record_ids.allocate('CGCfg', occupied)
+        ident = self.store.record_ids.allocate('CGCfg', occupied, project_path=target.path)
         changes, urls, total = {}, [], 0
         for index, variant in enumerate(item['_variants']):
             raw = self._read_selected(variant, 'cg')
@@ -1210,7 +1210,7 @@ class AssetCatalog:
                     except self.api.ApiError: present = False
                 if present:
                     skipped += 1;results.append({'id':int(prior_id),'name':item['name'],'imported':False});continue
-            ident = int(prior_id) if prior_id in rows else self.store.record_ids.allocate(table, rows)
+            ident = int(prior_id) if prior_id in rows else self.store.record_ids.allocate(table, rows, project_path=target.path)
             name = self.api.display_name(item['name'], item['_path'].stem)
             preview_bytes = None
             if kind == 'audio':

@@ -52,7 +52,8 @@ WORKSHOP_TAGS = {'剧情', '其他'}
 # Audios, Textures, manifest.json, deleted-talks.json, …) uploads verbatim
 # like the game's own publisher. Our sidecar must never leave the machine.
 STAGING_SKIP_DIRS = {'Backups'}
-STAGING_SKIP_FILES = {'.save.lock', 'workshop.json', 'workshop-pending.json', 'workshop-binding-backup.json'}
+STAGING_SKIP_FILES = {'.save.lock', 'workshop.json', 'workshop-pending.json', 'workshop-binding-backup.json',
+                      'sync-team.json'}
 
 
 class PublishError(Exception):

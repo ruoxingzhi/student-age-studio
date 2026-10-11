@@ -122,7 +122,7 @@ def save(store, project, data, previous, maps, original_talks, api):
                 if contains(rows): return True
             return any(isinstance(row, dict) and row.get('id') == ident for row in config.get('musics', []))
         compiled = up_audio.compile(cues, previous, talks, audios, local_audios, plan, config,
-                                    lambda occupied: store.record_ids.allocate('AudioCfg', {key: {} for key in occupied}), referenced)
+                                     lambda occupied: store.record_ids.allocate('AudioCfg', {key: {} for key in occupied}, project_path=project.path), referenced)
     except (ValueError, TypeError, KeyError, IndexError, AttributeError) as error:
         # API/I/O/JSON-read exceptions deliberately propagate. Only in-memory
         # incomplete configuration rolls back its generated fields.

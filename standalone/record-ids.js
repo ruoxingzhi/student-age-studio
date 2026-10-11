@@ -8,14 +8,20 @@ const token=window.STUDIO_TOKEN&&window.STUDIO_TOKEN!=='__STUDIO_TOKEN__'?window
 let registry=null,used=new Set(),blocks={},reserved=new Set(),working=false,draft=null,applying=null,undoEntry=null,redoEntry=null,checkTimer=null,checkSequence=0;
 const dialog=document.createElement('dialog');dialog.id='record-id-dialog';dialog.setAttribute('aria-label','修改编号');document.body.append(dialog);
 async function api(url,data){const response=await fetch(url,{method:data?'POST':'GET',headers:{'Content-Type':'application/json','X-Studio-Token':token},body:data?JSON.stringify(data):undefined});const value=await response.json();if(!response.ok)throw Error(value.error||'编号操作失败');return value;}
-function configure(data){registry=data;used=new Set([...Object.values(data.tables||{}).flat(),...(data.reservedIds||[])].map(Number));blocks={};for(const [child,[parent,factor]]of Object.entries(derived)){blocks[parent]||=new Set();for(const id of data.tables?.[child]||[])blocks[parent].add(Math.floor(Number(id)/factor));}blocks.PhoneMsgCfg=new Set((data.tables?.PhoneMsgCfg||[]).map(id=>Math.floor(Number(id)/1000)*1000+1));}
+let syncShard={shard:0,shards:1024,active:false};
+function shardRange(start,end,step,shard,shards){const count=Math.floor((end-start)/step)+1,per=Math.ceil(count/shards),lo=start+shard*per*step,hi=Math.min(end,lo+(per-1)*step);return [lo,hi];}
+function configure(data){registry=data;const shard=data.syncShard;syncShard=shard&&shard.active?{shard:shard.shard,shards:shard.shards||1024,active:true}:{shard:0,shards:1024,active:false};used=new Set([...Object.values(data.tables||{}).flat(),...(data.reservedIds||[])].map(Number));blocks={};for(const [child,[parent,factor]]of Object.entries(derived)){blocks[parent]||=new Set();for(const id of data.tables?.[child]||[])blocks[parent].add(Math.floor(Number(id)/factor));}blocks.PhoneMsgCfg=new Set((data.tables?.PhoneMsgCfg||[]).map(id=>Math.floor(Number(id)/1000)*1000+1));}
 let registryProject=null,registryPromise=null;
 async function ensure(projectId){if(registry&&registryProject===projectId)return registry;if(registryPromise?.projectId===projectId)return registryPromise.promise;const promise=refresh(projectId).finally(()=>{if(registryPromise?.promise===promise)registryPromise=null;});registryPromise={projectId,promise};return promise;}
 async function refresh(projectId=window.STUDIO_CURRENT_PROJECT?.()){if(!projectId)return;const data=await api('/api/ids?projectId='+encodeURIComponent(projectId));configure(data);registryProject=projectId;return data;}
 function rule(table,id,owner){if(derived[table]){const [parent,factor]=derived[table];owner=Number(owner??Math.floor(Number(id)/factor));return {min:1,max:2147483647,start:owner*factor+1,end:Math.min(2147483647,owner*factor+factor-1),owner,parent,factor,step:1};}return {min:1,max:2147483647,start:table==='BookCfg'?3000000:1000000,end:table==='BookCfg'?3999999:1999999,step:table==='PhoneMsgCfg'?1000:1};}
-function allocate(table,rows={},owner){if(!registry)throw Error('编号目录尚未读取完成，请稍后再试。');const r=rule(table,0,owner),low=r.start+(r.step===1000?1:0),count=Math.floor((r.end-low)/r.step)+1;if(!Number.isSafeInteger(count)||count<=0)throw Error('所属内容的编号超出可用范围。');const rand=new Uint32Array(1);crypto.getRandomValues(rand);const start=table==='TalkCfg'?0:rand[0]%count;
+function allocate(table,rows={},owner){if(!registry)throw Error('编号目录尚未读取完成，请稍后再试。');const r=rule(table,0,owner);let low=r.start+(r.step===1000?1:0),end=r.end,count=Math.floor((end-low)/r.step)+1,sharded=false;
+ // 协作号段：派生表跟主人走不用限；脚手架认领(claim)也不限；单人时 syncShard 不激活。
+ if(!derived[table]&&syncShard.active){const [lo,hi]=shardRange(low,end,r.step,syncShard.shard,syncShard.shards);if(lo>end)throw Error('你的号段用完了，请找主人重领一段。');low=lo;end=hi;count=Math.floor((hi-lo)/r.step)+1;sharded=true;}
+ if(!Number.isSafeInteger(count)||count<=0)throw Error('所属内容的编号超出可用范围。');const rand=new Uint32Array(1);crypto.getRandomValues(rand);const start=table==='TalkCfg'?0:rand[0]%count;
  const free=id=>!used.has(id)&&!reserved.has(id)&&!rows[id]&&!blocks[table]?.has(id);
  for(let n=0;n<count;n++){const id=low+(start+n)%count*r.step;if(free(id)){reserved.add(id);return id;}}
+ if(sharded)throw Error('你的号段用完了，请找主人重领一段。');
  for(let id=r.end+r.step;id<Math.min(2147483647,r.end+r.step+100000*r.step);id+=r.step)if(free(id)){reserved.add(id);return id;}
  throw Error('这类内容的可用编号已用尽。');}
 const project=()=>window.STUDIO_CURRENT_PROJECT?.(),revision=()=>window.STUDIO_CURRENT_REVISION?.();
@@ -97,5 +103,5 @@ function editDraft({oldId,title='修改编号',commit}){
  dialog.innerHTML=`<header><div><span class="record-id-eyebrow">编号设置</span><h2>${esc(title)}</h2></div><button data-id-cancel aria-label="关闭编号设置">×</button></header><p class="record-id-current">当前编号 <strong>${esc(oldId)}</strong></p><label for="record-id-value">新的编号</label><div class="record-id-input-row"><input id="record-id-value" type="text" inputmode="numeric" autocomplete="off" spellcheck="false" value="${esc(oldId)}"></div><p class="helper">输入 1–2147483647 之间的整数。与本模组已有编号重复时互换，相关引用同步更新。</p><p class="record-id-draft-note">应用到当前草稿，可撤销；保存模组后写入文件。手动指定的对话和选项编号会保持固定。</p><p data-id-error role="alert"></p><footer><button data-id-cancel>取消</button><button class="primary" data-id-apply>应用编号</button></footer>`;
  dialog.showModal();const input=dialog.querySelector('input');input.focus();input.select();
 }
-window.STUDIO_IDS={inline,editDraft,configure,refresh,ensure,allocate,claim,release,commitClaims,rule,open,apply,history,canUndo:()=>canHistory('undo'),canRedo:()=>canHistory('redo'),get busy(){return working;}};
+window.STUDIO_IDS={inline,editDraft,configure,refresh,ensure,allocate,claim,release,commitClaims,rule,shardRange,open,apply,history,canUndo:()=>canHistory('undo'),canRedo:()=>canHistory('redo'),get busy(){return working;}};
 })();

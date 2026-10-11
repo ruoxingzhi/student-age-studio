@@ -33,6 +33,20 @@
 6. `current_state()` 返回 `已修改／新增／已删除`；`timeline()` 倒序列存档点（编号／时间／作者／说明）。
 7. `size_warning()` 超 900MB 提醒一句，不拦。
 
+## 协作组与号段（多人同时新建不撞号）
+
+* 协作组文件 `StudentAgeStudio/sync-team.json` 跟 Mod 一起同步：
+  `{owner, members: {设备号: {名字, 号段, 加入时间}}}`。主人点"开始协作"建组
+  （自己是 0 号段）；加入时自动进组并随机领一段；只读打开不受影响。
+* 号段把每张表的可分配区间切成 1024 段，分片公式前后端各一份、逐位一致
+  （`sync_store.shard_interval`／`STUDIO_IDS.shardRange`，向量见两个单测）。
+  派生编号（对话跟事件走）不用限，主人分好了自然不撞；脚手架认领保持原样。
+* **单人（无组／不足两人）全程走老路**：`active_slot` 返回 None，前后端都不限段。
+* 撞号段会被指出来（组里同段点名），撞的人点"重领我的"或主人指定；
+  号段用完就报错找主人，不去别家串门。
+* `sync-team.json` 不进工坊上传包（`STAGING_SKIP_FILES`），不泄露成员名字；
+  备份里保留（回档连组一起回）。
+
 ## 铁律（改代码别碰）
 
 * 用户文案全中文，见 `test_sync_store.py:test_missing_git_message_is_chinese` 的断言方式；

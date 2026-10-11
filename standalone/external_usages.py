@@ -220,7 +220,7 @@ def apply(store,project,groups,previous,all_maps,touched,api,normalized_entries=
                 else:rid=0  # A changed recipient/item gets its own entry; never edits another recipient.
             if not rid:
                 if not d.get('create'):raise api.ApiError('请选择已有的'+d['label']+'配置。')
-                rid=store.record_ids.allocate(name,rows)
+                rid=store.record_ids.allocate(name,rows,project_path=project.path)
                 row={f['name']:copy.deepcopy(f.get('default')) for f in SCHEMAS[name]['fields']}
                 row['id']=rid;rows[str(rid)]=row
             rid=_int(rid,'用途配置编号',api);row=rows.get(str(rid))

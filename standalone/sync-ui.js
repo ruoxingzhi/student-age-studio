@@ -59,20 +59,26 @@ function create(host,options){
   const items=picks.map(p=>`<div class="sync-item"><div class="sync-item-main"><strong>${esc(p['文件'])}</strong><small>${esc(p['处理']||'')}</small></div><div class="sync-item-actions"><button data-sync="pick-mine" data-file="${esc(p['文件'])}" ${readonly()?'disabled':''}>就用我的</button><button class="primary" data-sync="pick-theirs" data-file="${esc(p['文件'])}" ${readonly()?'disabled':''}>要对方的</button></div></div>`).join('');
   return `<section class="sync-card" aria-label="待选"><h3>待选 <small>（${picks.length} 份）</small></h3><p class="helper">同一处两边改的不一样：你的已经在原位，对方的存在待选里，挑完才算完。</p><div class="sync-list">${items}</div></section>`;
  }
+ function teamCard(){
+  const t=S.data?.team;if(!t)return '';
+  if(!t.active)return `<section class="sync-card" aria-label="协作组"><h3>协作组</h3><p class="helper">开始协作后，每人领一段专属号段，同时新建内容也不会撞号。一个人用时不用开。</p><div class="sync-row"><button data-sync="team-start" ${readonly()?'disabled':''}>开始协作</button></div></section>`;
+  const rows=t.members.map(m=>`<div class="sync-item"><div class="sync-item-main"><strong>${esc(m.name)}${m.me?' · 我':''}${m.owner?' · 主人':''}</strong><small>号段 ${m.slot} / ${t.shards}</small></div>${t.isOwner&&!m.me?`<div class="sync-item-actions"><input data-sync-slot="${esc(m.id)}" inputmode="numeric" placeholder="0–1023" aria-label="给${esc(m.name)}指定号段"><button data-sync="team-slot" data-id="${esc(m.id)}">指定</button><button data-sync="team-remove" data-id="${esc(m.id)}">移出</button></div>`:''}</div>`).join('');
+  return `<section class="sync-card" aria-label="协作组"><div class="sync-head"><h3>协作组</h3><span class="sync-badge" data-ok="${t.collisions.length?'false':'true'}">${t.collisions.length?'撞号段了':'号段正常'}</span></div>${t.collisions.length?`<p class="wk-reference-note" role="status">这些人撞号段了：${esc(t.collisions.map(g=>g.join('、')).join('；'))}。撞的人点“重领我的”，或让主人指定。</p>`:''}<div class="sync-list">${rows}</div><div class="sync-row"><button data-sync="team-reroll" ${readonly()?'disabled':''}>重领我的号段</button><button data-sync="team-leave" ${readonly()?'disabled':''}>离开协作</button></div><p class="helper">我的号段：${t.mySlot??'—'}。新建内容只用自己的号段；派生编号（对话跟事件走）不受影响。</p></section>`;
+ }
  function settingsCard(){
   return `<section class="sync-card" aria-label="设置"><h3>设置</h3><label class="sync-label">中转站文件夹<small>网盘里的空文件夹；账本只会追加，不会删里面的东西。</small></label><div class="sync-row"><input data-sync-input="relayPath" value="${esc(S.relayPath||S.data?.relay||'')}" placeholder="例如 D:\\网盘\\拾光工坊同步" aria-label="中转站文件夹" ${readonly()?'disabled':''}><button data-sync="relay" ${readonly()?'disabled':''}>设为中转站</button><button data-sync="join" ${readonly()?'disabled':''}>加入同步</button></div><label class="sync-label">这台电脑的名字</label><div class="sync-row"><input data-sync-input="deviceName" maxlength="30" value="${esc(S.deviceName||S.data?.device?.name||'')}" aria-label="这台电脑的名字" ${readonly()?'disabled':''}><button data-sync="rename" ${readonly()?'disabled':''}>改名</button></div></section>`;
  }
  function render(){
   if(!alive)return;
   const d=S.data;
-  host.innerHTML=`<div class="sync-wrap"><div class="sync-head"><div><span class="eyebrow">多人协作 · 多平台同步</span><h2>同步协作</h2><p>${esc(options.project.name||options.project.title||'当前模组')}</p></div></div>${readonly()?'<p class="wk-reference-note">订阅模组只能看。想一起写，先去创建副本。</p>':''}${d?statusCard()+saveCard()+syncCard()+picksCard()+timelineCard()+settingsCard():'<p class="helper">正在读取同步状态…</p>'}</div>`;
+  host.innerHTML=`<div class="sync-wrap"><div class="sync-head"><div><span class="eyebrow">多人协作 · 多平台同步</span><h2>同步协作</h2><p>${esc(options.project.name||options.project.title||'当前模组')}</p></div></div>${readonly()?'<p class="wk-reference-note">订阅模组只能看。想一起写，先去创建副本。</p>':''}${d?statusCard()+saveCard()+syncCard()+picksCard()+timelineCard()+teamCard()+settingsCard():'<p class="helper">正在读取同步状态…</p>'}</div>`;
   paintJob();
  }
  async function refresh(){
   const data=await api('/api/sync-status?projectId='+encodeURIComponent(options.project.id));
   if(!alive)return;
   S.data=data;
-  if(!S.deviceName&&data.device)S.deviceName='';
+  noteRevision(data.revision);
   render();
  }
  async function reloadProject(){
@@ -91,7 +97,8 @@ function create(host,options){
   api('/api/sync-job?jobId='+encodeURIComponent(S.job.jobId)).then(job=>{
    if(!alive)return;S.job=job;paintJob();
    if(['done','error','cancelled'].includes(job.state)){
-    refresh().then(()=>{if(job.state==='done'&&(job.report?.['合上']?.length||job.report?.['待选']?.length))reloadProject();if(job.revision)noteRevision(job.revision);}).catch(e=>statusMessage(e.message,true));
+    // 修订号以 refresh 拿到的为准：任务开工时的已经旧了，用它会顶掉别人的保存。
+    refresh().then(()=>{if(job.state==='done'&&(job.report?.['合上']?.length||job.report?.['待选']?.length))reloadProject();}).catch(e=>statusMessage(e.message,true));
     return;
    }
    timer=setTimeout(poll,900);
@@ -152,6 +159,28 @@ function create(host,options){
     await refresh();reloadProject();
    }).catch(()=>{});
   }
+  else if(action==='team-start')run(async()=>{
+   await api('/api/sync-team-start',{projectId:options.project.id});
+   statusMessage('协作组建好了，你是主人，号段 0。');await refresh();
+  }).catch(()=>{});
+  else if(action==='team-reroll')run(async()=>{
+   await api('/api/sync-team-reroll',{projectId:options.project.id});
+   statusMessage('号段已重领，新建内容会用新的段。');await refresh();
+  }).catch(()=>{});
+  else if(action==='team-slot')run(async()=>{
+   const input=button.parentElement?.querySelector('input');const shard=Number(input?.value);
+   if(!Number.isInteger(shard)||shard<0||shard>1023)throw Error('号段是 0 到 1023 的整数。');
+   await api('/api/sync-team-slot',{projectId:options.project.id,deviceId:button.dataset.id,shard});
+   statusMessage('号段已指定。');await refresh();
+  }).catch(()=>{});
+  else if(action==='team-remove')run(async()=>{
+   await api('/api/sync-team-remove',{projectId:options.project.id,deviceId:button.dataset.id});
+   statusMessage('已移出。');await refresh();
+  }).catch(()=>{});
+  else if(action==='team-leave')run(async()=>{
+   await api('/api/sync-team-remove',{projectId:options.project.id});
+   statusMessage('已离开协作组。');await refresh();
+  }).catch(()=>{});
  };
  host.oninput=e=>{
   const input=e.target.closest('[data-sync-input]');if(!input)return;

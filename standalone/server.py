@@ -3414,7 +3414,7 @@ class StudioStore:
                         'previewCodec': 'aac' if aac else None}
             inherited = self.catalog_rows("AudioCfg")
             occupied = set(table) | set(inherited)
-            ident = self.record_ids.allocate('AudioCfg', {str(k): {} for k in occupied})
+            ident = self.record_ids.allocate('AudioCfg', {str(k): {} for k in occupied}, project_path=project.path)
             if not valid_id(ident):
                 raise ApiError("可用音频编号不足。")
             relative = "Audios/studio_" + time.strftime("%Y%m%d_%H%M%S") + "_" + secrets.token_hex(5) + extension
@@ -3734,7 +3734,7 @@ class StudioStore:
                 person_id = payload.get("personId")
                 if person_id is None or person_id == "":
                     occupied_persons = {**catalog.get("persons", {}), **{str(int(key) // 1000): {} for key in {**catalog.get("faces", {}), **faces} if str(key).isdigit()}}
-                    person_id = self.record_ids.allocate('PersonCfg', {**occupied_persons, **persons})
+                    person_id = self.record_ids.allocate('PersonCfg', {**occupied_persons, **persons}, project_path=project.path)
                 elif not valid_id(person_id) and not (person_id in (0, '0') and not isinstance(person_id, bool)
                                                        and ('0' in persons or '0' in catalog.get('persons', {}))):
                     raise ApiError("请选择已有的有效人物，或选择新建人物。")
@@ -3779,7 +3779,7 @@ class StudioStore:
                 table = "cgs" if kind == "cg" else "backgrounds"
                 rows = local_map(table)
                 reserved = {str(int(value)): {} for value in payload.get('reservedIds', []) if valid_id(value)}
-                ident = self.record_ids.allocate(TABLES[table][:-5], {**rows, **reserved})
+                ident = self.record_ids.allocate(TABLES[table][:-5], {**rows, **reserved}, project_path=project.path)
                 row = ({"id": ident, "name": name, "urls": [resource_url], "group": 3, "gender": 0, "comic": [], "idx": 0, "move": [], "startTalks": []}
                        if kind == "cg" else {"id": ident, "name": name, "url": resource_url, "audio": 0, "cloth": [], "gaozhongCond": [], "gaozhongUrl": 0})
                 rows[str(ident)] = row
@@ -4584,6 +4584,9 @@ class StudioHandler(BaseHTTPRequestHandler):
                 if result is None:
                     raise ApiError('找不到该同步任务。', 404, 'not_found')
                 return self.send_json(result)
+            if route == "/api/sync-team":
+                return self.send_json(self.server.sync_service.team(
+                    self.server.store, sys.modules[__name__], query.get('projectId', [''])[0]))
             if route == "/api/project-preferences":
                 if query.get("startup", [""])[0] == "1":
                     return self.send_json({"defaultProjectId": self.server.store.project_preferences.saved.get("defaultProjectId", "")})
@@ -5026,6 +5029,18 @@ class StudioHandler(BaseHTTPRequestHandler):
                         self.server.store, sys.modules[__name__], payload))
                 except sync_store.SyncError as error:
                     raise ApiError(error.message, 400, error.code)
+            if route == "/api/sync-team-start":
+                return self.send_json(self.server.sync_service.team_start(
+                    self.server.store, sys.modules[__name__], payload), 201)
+            if route == "/api/sync-team-reroll":
+                return self.send_json(self.server.sync_service.team_reroll(
+                    self.server.store, sys.modules[__name__], payload), 201)
+            if route == "/api/sync-team-slot":
+                return self.send_json(self.server.sync_service.team_slot(
+                    self.server.store, sys.modules[__name__], payload))
+            if route == "/api/sync-team-remove":
+                return self.send_json(self.server.sync_service.team_remove(
+                    self.server.store, sys.modules[__name__], payload))
             if route == '/api/premises/references':
                 return self.send_json(self.server.store.premise_references(payload))
             if route == "/api/premises/create":

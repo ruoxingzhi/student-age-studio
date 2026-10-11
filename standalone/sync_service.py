@@ -232,6 +232,93 @@ class SyncService:
         return {'device': syncer.set_device_name(((payload or {}).get('name') or ''))}
 
     @_api_errors
+    def team_view(self, store, project):
+        import sync_store
+        syncer = self._syncer(store, project)
+        device = sync_store.ensure_device(syncer.store)
+        team = sync_store.read_team(project.path)
+        if team is None:
+            return {'active': False, 'isOwner': False, 'myDeviceId': device['id'],
+                    'mySlot': None, 'shards': sync_store.SHARDS, 'members': [], 'collisions': []}
+        members = [{'id': key, 'name': row['name'], 'slot': row['slot'],
+                    'me': key == device['id'], 'owner': key == team['owner']}
+                   for key, row in team['members'].items()]
+        members.sort(key=lambda row: (row['slot'], row['name']))
+        me = team['members'].get(device['id'])
+        return {'active': True, 'isOwner': team['owner'] == device['id'],
+                'myDeviceId': device['id'], 'mySlot': me['slot'] if me else None,
+                'shards': sync_store.SHARDS, 'members': members,
+                'collisions': sync_store.team_collisions(team)}
+
+    @_api_errors
+    def team(self, store, api, project_id):
+        project = store.project(project_id)
+        return self.team_view(store, project)
+
+    @_api_errors
+    def team_start(self, store, api, payload):
+        import sync_store
+        project = store.project((payload or {}).get('projectId'), writable=True)
+        syncer = self._syncer(store, project)
+        syncer.start_fresh()
+        device = sync_store.ensure_device(syncer.store)
+        team, created = sync_store.ensure_team(project.path, device)
+        if not created:
+            raise SyncError('已经开始协作了，直接加人就行。', 'team_exists')
+        syncer.commit_team(f'开始协作：{device["name"]}建组')
+        result = self.team_view(store, project)
+        result['revision'] = store.revision(project)
+        return result
+
+    @_api_errors
+    def team_reroll(self, store, api, payload):
+        import sync_store
+        project = store.project((payload or {}).get('projectId'), writable=True)
+        syncer = self._syncer(store, project)
+        device = sync_store.ensure_device(syncer.store)
+        sync_store.reroll_slot(project.path, device['id'])
+        syncer.commit_team('重领号段')
+        result = self.team_view(store, project)
+        result['revision'] = store.revision(project)
+        return result
+
+    @_api_errors
+    def team_slot(self, store, api, payload):
+        import sync_store
+        project = store.project((payload or {}).get('projectId'), writable=True)
+        syncer = self._syncer(store, project)
+        device = sync_store.ensure_device(syncer.store)
+        team = sync_store.read_team(project.path)
+        if team is None:
+            raise SyncError('还没开始协作。', 'team_missing')
+        if team['owner'] != device['id']:
+            raise SyncError('只有主人能指定号段，你可以点“重领我的”。', 'team_not_owner')
+        sync_store.set_member_slot(project.path, ((payload or {}).get('deviceId') or ''),
+                                   ((payload or {}).get('shard')))
+        syncer.commit_team('主人指定号段')
+        result = self.team_view(store, project)
+        result['revision'] = store.revision(project)
+        return result
+
+    @_api_errors
+    def team_remove(self, store, api, payload):
+        import sync_store
+        project = store.project((payload or {}).get('projectId'), writable=True)
+        syncer = self._syncer(store, project)
+        device = sync_store.ensure_device(syncer.store)
+        team = sync_store.read_team(project.path)
+        if team is None:
+            raise SyncError('还没开始协作。', 'team_missing')
+        target = str(((payload or {}).get('deviceId') or '') or device['id'])
+        if target != device['id'] and team['owner'] != device['id']:
+            raise SyncError('只有主人能移出别人，你只能离开自己。', 'team_not_owner')
+        left = '离开协作' if target == device['id'] else '主人移出成员'
+        sync_store.remove_member(project.path, target)
+        syncer.commit_team(left)
+        result = self.team_view(store, project)
+        result['revision'] = store.revision(project)
+        return result
+
     def overview(self, store, api, project_id):
         project = store.project(project_id)
         syncer = self._syncer(store, project)
@@ -250,6 +337,7 @@ class SyncService:
             'state': {'已修改': len(state['已修改']), '新增': len(state['新增']),
                       '已删除': len(state['已删除'])},
             'sizeWarning': syncer.size_warning(),
+            'team': self.team_view(store, project),
             'revision': store.revision(project),
             'readOnly': bool(getattr(project, 'readOnly', False) or getattr(project, 'readonly', False)
                              or str(project.id).startswith('workshop:')),

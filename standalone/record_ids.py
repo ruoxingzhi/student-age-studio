@@ -86,12 +86,20 @@ class RecordIds:
             # IDs allocated server-side since startup (e.g. by another window's
             # asset import) are not on disk yet; publish them so scaffolds in
             # this window never claim them.
+            shard_info = {'active': False, 'shard': 0, 'shards': 1024}
+            try:
+                import sync_store
+                slot = sync_store.active_slot(project.path)
+                if slot is not None:
+                    shard_info = {'active': True, 'shard': slot, 'shards': sync_store.SHARDS}
+            except Exception:
+                pass
             return {'projectId': project.id, 'revision': revision,
                     'tables': {n: sorted(v) for n, v in used.items() if v}, 'linked': LINKED,
                     'rules': {n: rule(n) for n in used if n not in DERIVED},
-                    'reservedIds': sorted(self.reserved)}
+                    'reservedIds': sorted(self.reserved), 'syncShard': shard_info}
 
-    def allocate(self, table, rows=None, owner=None):
+    def allocate(self, table, rows=None, owner=None, project_path=None):
         with self.store.catalog_scope(): used = self.occupied()
         blocked = set().union(*used.values(), self.reserved, getattr(self, 'draft_reserved', set()), {int(k) for k in (rows or {}) if str(k).isdigit()})
         if table in ('EvtCfg', POST, 'PersonCfg'):
@@ -102,6 +110,24 @@ class RecordIds:
         r = rule(table, owner=owner)
         low, high, step = r['start'], r['end'], r['step']
         if step == 1000: low += 1
+        # 协作号段：派生表跟主人走不用限；多人组的普通表只在自己的段里找。
+        # 单人（无组／不足两人）slot 为 None，走完全老的路，一位都不差。
+        slot = None
+        if table not in DERIVED and project_path is not None:
+            try:
+                import sync_store
+                slot = sync_store.active_slot(project_path)
+            except Exception:
+                slot = None
+        sharded = slot is not None
+        if sharded:
+            try:
+                import sync_store
+                low, high = sync_store.shard_interval(low, high, step, slot)
+            except Exception:
+                raise self.b.ApiError('你的号段用完了，请找主人重领一段。')
+            if low > high:
+                raise self.b.ApiError('你的号段用完了，请找主人重领一段。')
         count = (high - low) // step + 1
         if count <= 0: raise self.b.ApiError('所属内容的编号超出可用范围。')
         start = 0 if table == 'TalkCfg' else secrets.randbelow(count)
@@ -110,9 +136,9 @@ class RecordIds:
             if ident not in blocked:
                 self.reserved.add(ident)
                 return ident
+        if sharded:
+            raise self.b.ApiError('你的号段用完了，请找主人重领一段。')
         # The preferred block is full: fall back to the rest of the game's range.
-        # Probes stay bounded so a saturated registry raises instead of hanging
-        # the request thread in a billions-long scan.
         for ident in range(high + step, min(2147483647, high + step + 100000 * step), step):
             if ident not in blocked:
                 self.reserved.add(ident)

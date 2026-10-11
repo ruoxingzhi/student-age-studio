@@ -97,6 +97,9 @@ Backend + frontend live side by side in `standalone/`; no web framework, no JS b
 - UI: `sync-ui.js` + `sync.css` mounted as workshop feature `sync` (same pattern as idle-chats);
   style only with `--sg-*` tokens so all six themes adapt. UI test `tests/sync-ui.cjs` runs
   in the Linux CI block of `check.yml`.
+- Collaboration shards: `sync-team.json` partitions each table's ID range into 1024 shards
+  (`sync_store.shard_interval` / `STUDIO_IDS.shardRange`, shared vectors in both test files).
+  Solo mods (no team) take the unsharded path; derived tables and scaffold claims are exempt.
 
 ## Never commit
 
