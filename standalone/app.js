@@ -27,7 +27,7 @@ const fragment = decodeURIComponent(location.hash.slice(1));
 const injected = window.STUDIO_TOKEN;
 const token = injected && injected !== '__STUDIO_TOKEN__' ? injected : (fragment.startsWith('token=') ? fragment.slice(6) : fragment);
 const S = {projects:[],project:null,doc:null,revision:null,localIds:{},catalogAvailable:false,selected:null,event:'all',
-  order:[],premises:{},pinned:{talks:new Set(),options:new Set(),events:new Set()},catalogAll:{},effectTemplates:[],branchFolders:{},folderOpen:{},activeFolder:null,conditionTemplates:[],conditionRefs:{},conditionLocalIds:{},undo:[],redo:[],coalesce:null,saved:'',savedOwners:null,dirty:false,saving:false,deleted:[],replacements:{},search:'',listStart:0,listAnchor:null,
+  order:[],premises:{},pinned:{talks:new Set(),options:new Set(),events:new Set()},catalogAll:{},effectTemplates:[],branchFolders:{},folderOpen:{},activeFolder:null,conditionTemplates:[],conditionRefs:{},conditionLocalIds:{},undo:[],redo:[],coalesce:null,saved:'',savedOwners:null,dirty:false,saving:false,deleted:[],reverted:[],replacements:{},search:'',listStart:0,listAnchor:null,
   previewRole:null,face:0,cloth:0,grade:0,previewCG:false,connected:false,audios:[],audioLoading:false,bgmDraft:null,catalogIds:{},idMappings:{},autoRenumber:true};
 try { localStorage.removeItem('studentAgeStudio.settings'); } catch (_) {}
 const originalFetch=window.fetch.bind(window);
@@ -109,7 +109,7 @@ function ownershipSnapshotDelta(value){if(value===ownersSnapshotRef&&ownersSnaps
 // entry.doc keeps its usual shape (history scans read its tables); only the ownership map is a delta.
 function snapshotDoc(){if(!S.doc)return S.doc;const rest={...S.doc};delete rest.talkOwners;return clone(rest);}
 function restoredDoc(entry){const doc=entry.doc;if(entry.talkOwners)doc.talkOwners=objectRestore(entry.talkOwners);return doc;}
-function snapshot(label) {return {label,externalFolder:externalSession?.folder,doc:snapshotDoc(),talkOwners:S.doc&&Object.hasOwn(S.doc,'talkOwners')?ownershipSnapshotDelta(S.doc.talkOwners):null,order:arrayDelta('order',S.order),premises:clone(S.premises),branchFolders:clone(S.branchFolders),activeFolder:S.activeFolder,selected:S.selected,event:S.event,deleted:S.deleted.slice(),replacements:clone(S.replacements),pinnedIds:pinnedSnapshot(),idMappings:clone(S.idMappings||{}),localIds:idsDelta(S.localIds)};}
+function snapshot(label) {return {label,externalFolder:externalSession?.folder,doc:snapshotDoc(),talkOwners:S.doc&&Object.hasOwn(S.doc,'talkOwners')?ownershipSnapshotDelta(S.doc.talkOwners):null,order:arrayDelta('order',S.order),premises:clone(S.premises),branchFolders:clone(S.branchFolders),activeFolder:S.activeFolder,selected:S.selected,event:S.event,deleted:S.deleted.slice(),reverted:S.reverted.slice(),replacements:clone(S.replacements),pinnedIds:pinnedSnapshot(),idMappings:clone(S.idMappings||{}),localIds:idsDelta(S.localIds)};}
 function history(label, key) {
   invalidateStageMemo();
   stopLinePlayback(false);
@@ -182,7 +182,7 @@ function updateTextDirty(){
 }
 function ownersDiffer(){if(!S.doc)return false;const a=S.doc.talkOwners||null,b=S.savedOwners||null;return a!==b&&!sameValue(a,b);}
 function updateDirty() {clearTimeout(textDirtyTimer);textDirtyTimer=null;invalidateStageMemo();S.dirty=S.doc !== null && (currentSignature() !== S.saved||ownersDiffer()||Object.values(S.idMappings||{}).some(m=>Object.keys(m).length));renderChrome();}
-function restore(entry) {if(externalSession&&entry.externalFolder!==undefined)externalSession.folder=entry.externalFolder;S.doc=restoredDoc(entry);seedOwnershipSnapshot(S.doc?.talkOwners||{});S.order=arrayRestore(entry.order);S.premises=entry.premises||{};S.branchFolders=entry.branchFolders||{};S.activeFolder=entry.activeFolder||null;S.selected=entry.selected;S.event=entry.event;S.deleted=entry.deleted;S.replacements=entry.replacements;S.pinned=Object.fromEntries(['talks','options','events'].map(k=>[k,new Set(entry.pinnedIds?.[k]||[])]));S.idMappings=clone(entry.idMappings||{});if(entry.localIds)S.localIds=idsRestore(entry.localIds);clearTimeout(renumberTimer);S.coalesce=null;reconcileStoryClaims();updateDirty();render();}
+function restore(entry) {if(externalSession&&entry.externalFolder!==undefined)externalSession.folder=entry.externalFolder;S.doc=restoredDoc(entry);seedOwnershipSnapshot(S.doc?.talkOwners||{});S.order=arrayRestore(entry.order);S.premises=entry.premises||{};S.branchFolders=entry.branchFolders||{};S.activeFolder=entry.activeFolder||null;S.selected=entry.selected;S.event=entry.event;S.deleted=entry.deleted;S.reverted=entry.reverted||[];S.replacements=entry.replacements;S.pinned=Object.fromEntries(['talks','options','events'].map(k=>[k,new Set(entry.pinnedIds?.[k]||[])]));S.idMappings=clone(entry.idMappings||{});if(entry.localIds)S.localIds=idsRestore(entry.localIds);clearTimeout(renumberTimer);S.coalesce=null;reconcileStoryClaims();updateDirty();render();}
 function undo() {if(!S.undo.length)return;const e=S.undo.pop();S.redo.push(snapshot(e.label));restore(e);toast('已撤销：'+e.label);}
 function redo() {if(!S.redo.length)return;const e=S.redo.pop();S.undo.push(snapshot(e.label));restore(e);toast('已重做：'+e.label);}
 function links(t) {
@@ -995,7 +995,7 @@ async function loadProject(id,preserve=false) {
   const computedOrder=initialOrder();const storedOrder=ids(data.order).filter(id=>id in S.doc.talks);S.order=[...new Set([...storedOrder,...computedOrder])];S.event=preserve&&(oldEvent==='all'||S.doc.events[oldEvent])?oldEvent:(values(S.doc.events)[0]?.id || 'all');
   searchStamp='';++searchSequence;S.segmentSearch=null;S.search='';$('#talk-search').value='';S.selected=preserve&&S.doc.talks[oldSelection]?oldSelection:(visibleIds()[0]||null);
   S.pinned={talks:new Set((data.pinnedIds?.talks||[]).map(Number)),options:new Set((data.pinnedIds?.options||[]).map(Number)),events:new Set((data.pinnedIds?.events||[]).map(Number))};S.catalogAll=Object.fromEntries(MAPS.map(k=>[k,new Set((data.catalogIds?.[k]||[]).map(String))]));
-  const localTalkIds=new Set((S.localIds.talks||[]).map(Number));S.catalogTalkIds=new Set(Object.keys(S.doc.talks).map(Number).filter(id=>!localTalkIds.has(id)));S.catalogIds=Object.fromEntries(MAPS.map(k=>{const local=new Set((S.localIds[k]||[]).map(String));return [k,new Set(Object.keys(S.doc[k]||{}).filter(id=>!local.has(String(id))))];}));S.idMappings={};S.deleted=[];S.replacements={};S.undo=[];S.redo=[];S.coalesce=null;S.saved=currentSignature();S.dirty=false;
+  const localTalkIds=new Set((S.localIds.talks||[]).map(Number));S.catalogTalkIds=new Set(Object.keys(S.doc.talks).map(Number).filter(id=>!localTalkIds.has(id)));S.catalogIds=Object.fromEntries(MAPS.map(k=>{const local=new Set((S.localIds[k]||[]).map(String));return [k,new Set(Object.keys(S.doc[k]||{}).filter(id=>!local.has(String(id))))];}));S.idMappings={};S.deleted=[];S.reverted=[];S.replacements={};S.undo=[];S.redo=[];S.coalesce=null;S.saved=currentSignature();S.dirty=false;
   if(S.previewRole===null||!S.doc.persons[S.previewRole])S.previewRole=values(S.doc.persons).filter(p=>!S.goalImageIds?.includes(String(p.id)))[0]?.id??null;
   await Remote.ensure(S.doc.talks,S.selected==null?[]:[S.selected],{pin:true});if(request!==projectLoadSequence)return false;const t=talk();if(t&&ids(t.roleIds).length)S.previewRole=ids(t.roleIds)[0];syncFaceFromTalk();
   S.conditionTemplates=[];S.effectTemplates=[];S.conditionRefs={};S.conditionLocalIds={};S.conditionsLoading=true;
@@ -1023,10 +1023,11 @@ function changedStoryPayload(mappings,baseline){
 function changedStoryPayloadFrom(baseline=S.saved?IndexedTalks.parse(S.saved):[]){
  const before=baseline[0]||{};
  const payload={projectId:S.project.id,revision:S.revision};if(Remote.info(S.doc.talks))payload.talkGeneration=Remote.info(S.doc.talks).base.token;
+ const reverted=[...new Set(S.reverted)].filter(id=>!S.doc?.talks?.[id]);if(reverted.length)payload.revertedTalks=reverted;
  for(const [key,value] of Object.entries(S.doc)){
   if(key==='talkOwners')continue;
   const patch=key==='talks'?IndexedTalks.delta(value,before[key]):null;
-  if(patch){if(Object.keys(patch.upsert).length||patch.deleted.length)payload.talkPatch=patch;}
+  if(patch){if(reverted.length)patch.deleted=patch.deleted.filter(id=>!reverted.includes(Number(id)||id));if(Object.keys(patch.upsert).length||patch.deleted.length)payload.talkPatch=patch;}
   else if(IndexedTalks.stringify(value)!==IndexedTalks.stringify(before[key]))payload[key]=value;
  }
  const owners=S.doc?.talkOwners||null;if(owners&&owners!==S.savedOwners)payload.talkOwners=owners;
@@ -1180,8 +1181,9 @@ function enterEvent(id) {
 function deleteEvents(eventIds) {
  if(!editable())return false;const selected=eventIds.map(Number).filter(id=>S.doc.events[id]);if(!selected.length)return false;
  StudentAgeEventOwnership.sync(S.doc,S.branchFolders);
- const local=Object.keys(S.doc.talks).map(Number).filter(id=>!(S.catalogTalkIds||new Set()).has(id));
- const {talks:owned,options:ownOptions}=StudentAgeEventOwnership.plan(S.doc,S.branchFolders,selected,local);
+ const overrides=new Set((S.localIds?.talks||[]).filter(id=>S.catalogAll?.talks?.has(String(id))).map(Number));
+ const local=Object.keys(S.doc.talks).map(Number).filter(id=>!(S.catalogTalkIds||new Set()).has(id)&&!overrides.has(id));
+ const {talks:owned,options:ownOptions,reverted:uncovered}=StudentAgeEventOwnership.plan(S.doc,S.branchFolders,selected,local,[...overrides]);
  const references=[];for(const o of values(S.doc.options))if(!ownOptions.has(Number(o.id))&&selected.includes(Number(o.nextEvtId)))references.push(o.content||'选项');
  for(const f of values(S.branchFolders))if(!owned.has(Number(f.parentTalkId))&&f.continuation?.kind==='event'&&selected.includes(Number(f.continuation.eventId)))references.push('对话夹');
  // Deleting is never refused: dangling jumps are reported so they can be adjusted afterwards.
@@ -1189,13 +1191,16 @@ function deleteEvents(eventIds) {
  mutate('删除事件及专属对话',()=>{
   removePremises(Object.keys(S.premises).filter(k=>selected.includes(Number(S.premises[k].eventId))));for(const id of selected){StudentAgeEventBindings.clearSocialBindings(S.doc,S.doc.events[id]);delete S.doc.events[id];delete S.doc.eventGrades?.[id];}
   for(const row of values(S.doc.actionEvents))if(ids(row.evts).some(value=>selected.includes(value)))row.evts=ids(row.evts).filter(value=>!selected.includes(value));for(const row of values(S.doc.actions))if(selected.includes(Number(row.evtId)))row.evtId=0;for(const row of values(S.doc.interactions))if(owned.has(Number(row.talkId)))delete S.doc.interactions[row.id];
-  const replacements={},owners={...S.doc.talkOwners};for(const tid of owned){delete S.doc.talks[tid];delete owners[tid];S.deleted.push(tid);replacements[tid]=[];delete S.doc.audioCues.sfx[tid];if(S.doc.audioCues.nativeAudio)delete S.doc.audioCues.nativeAudio[tid];}if(owned.size)S.doc.talkOwners=owners;
+  const replacements={},owners={...S.doc.talkOwners};for(const tid of owned){delete S.doc.talks[tid];delete owners[tid];S.deleted.push(tid);replacements[tid]=[];delete S.doc.audioCues.sfx[tid];if(S.doc.audioCues.nativeAudio)delete S.doc.audioCues.nativeAudio[tid];}
+  // Original lines the mod had copied go back to the base game: the row leaves the mod without a deletion record.
+  for(const tid of uncovered){delete S.doc.talks[tid];delete owners[tid];S.reverted.push(tid);delete S.doc.audioCues.sfx[tid];if(S.doc.audioCues.nativeAudio)delete S.doc.audioCues.nativeAudio[tid];}
+  if(owned.size||uncovered.size)S.doc.talkOwners=owners;
   // Repair links in one pass that leaves untouched rows alone. A pass per deleted line rewrote every dialogue each
   // time, which froze large mods and left the whole table marked as edited for every later edit.
   Object.assign(S.replacements,replacements);Timeline.replaceMany(S.doc,S.branchFolders,replacements);
   // plan() keeps any option that a remaining dialogue or event still lists, so no remaining row needs rewriting.
   for(const oid of ownOptions)delete S.doc.options[oid];
-  S.order=S.order.filter(t=>!owned.has(t));S.branchFolders=Branches.cleanup(S.doc,S.branchFolders,S.replacements);S.doc.audioCues.bgm=S.doc.audioCues.bgm.map(g=>({...g,talkIds:ids(g.talkIds).filter(t=>!owned.has(t))})).filter(g=>g.talkIds.length);
+  S.order=S.order.filter(t=>!owned.has(t)&&!uncovered.has(t));S.branchFolders=Branches.cleanup(S.doc,S.branchFolders,S.replacements);S.doc.audioCues.bgm=S.doc.audioCues.bgm.map(g=>({...g,talkIds:ids(g.talkIds).filter(t=>!owned.has(t)&&!uncovered.has(t))})).filter(g=>g.talkIds.length);
   if(selected.includes(Number(S.event))){S.event=values(S.doc.events)[0]?.id||'all';S.selected=null;S.activeFolder=null;}
  });window.STUDIO_EVENTS?.refresh();return true;
 }

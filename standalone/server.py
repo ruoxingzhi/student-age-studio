@@ -1919,6 +1919,12 @@ class StudioStore:
             catalog = self.catalog()
             all_maps, unreadable = self.story_save_maps(project, payload)
             payload = dict(payload)
+            # Rows the editor dropped because they only re-added base-game content: the mod stops overriding them,
+            # and they must not become deletions, or the original line disappears from the game.
+            reverted = payload.pop('revertedTalks', []) or []
+            if not isinstance(reverted, list) or any(not valid_id(ident) or isinstance(ident, bool) for ident in reverted):
+                raise ApiError('恢复原版对话的编号记录无效；原文件未修改。')
+            reverted = {str(int(ident)) for ident in reverted}
             # A partial table must never enter the legacy missing-row deletion path.
             # Expand explicit deltas against this exact revision while holding the save lock.
             if 'talkPatch' in payload:
@@ -1937,6 +1943,7 @@ class StudioStore:
                 prior = flat_deletions(read_json(safe_path(project.path, 'StudentAgeStudio/deleted-talks.json'), {}))
                 for key in prior: current.pop(key, None)
                 for key in deleted: current.pop(str(key), None)
+                for key in reverted: current.pop(key, None)
                 current.update(rows)
                 payload['talks'] = current
                 payload['deletedIds'] = list(dict.fromkeys([*payload.get('deletedIds', []), *deleted]))
@@ -2072,16 +2079,16 @@ class StudioStore:
             removed = set(str(ident) for ident in deleted) | cascade_deleted
             if "talks" in payload:
                 prior_markers = flat_deletions(read_json(project.path / "StudentAgeStudio/deleted-talks.json", {}))
-                undeclared = set(original_talks) - set(payload["talks"]) - removed - set(prior_markers)
+                undeclared = set(original_talks) - set(payload["talks"]) - removed - set(prior_markers) - reverted
                 if undeclared:
                     sample = ", ".join(sorted(undeclared)[:5])
                     save_review.warn(ApiError, "对话表未提交 " + str(len(undeclared)) + " 行（例如 " + sample +
                                      "）。已保留磁盘上的这些对话，只写入已提交的修改。")
                     payload['talks'] = {**{key: original_talks[key] for key in undeclared}, **payload['talks']}
                     all_maps.setdefault('TalkCfg.json', {}).update({key: original_talks[key] for key in undeclared})
-                removed.update(set(original_talks) - set(payload["talks"]) - set(prior_markers))
+                removed.update(set(original_talks) - set(payload["talks"]) - set(prior_markers) - reverted)
                 if payload.get("_fullCatalogTable") == "TalkCfg" or isinstance(catalog.get("talks"), dict):
-                    removed.update(set(catalog_talks) - set(payload["talks"]))
+                    removed.update(set(catalog_talks) - set(payload["talks"]) - reverted)
             if unreadable and (removed or ('options' in payload and previous_options - set(payload['options']))):
                 error = next(iter(unreadable.values()))
                 save_warnings.append(error.message + '。该文件中对被删对话或选项的引用未检查。')
@@ -2091,6 +2098,8 @@ class StudioStore:
             prior_deleted = read_json(safe_path(project.path, "StudentAgeStudio/deleted-talks.json"), {})
             prior_redirects = flat_deletions(prior_deleted)
             redirects = copy.deepcopy(prior_redirects)
+            for key in reverted:
+                redirects.pop(key, None)
             # Existing native redirect overrides must survive even before a base-game catalog is exported.
             native_tombstones = set(prior_redirects).intersection(original_talks)
             for key in removed:
